@@ -7,6 +7,16 @@
 
 #include "RTL8139Ethernet.h"
 #include <IOKit/IOMemoryDescriptor.h>
+#include <mach/kmod.h>
+
+// Declare kmod_info — required for the kernel to load the kext
+extern "C" {
+    extern kern_return_t _start(kmod_info_t *ki, void *data);
+    extern kern_return_t _stop(kmod_info_t *ki, void *data);
+}
+KMOD_EXPLICIT_DECL(org.puredarwin.driver.RTL8139Ethernet, "1.0.0", _start, _stop)
+__private_extern__ kmod_start_func_t *_realmain = 0;
+__private_extern__ kmod_stop_func_t  *_antimain = 0;
 
 #define super IOEthernetController
 OSDefineMetaClassAndStructors(RTL8139Ethernet, IOEthernetController)
