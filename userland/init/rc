@@ -1,0 +1,45 @@
+#!/bin/sh
+#
+# /etc/rc — PureDarwin boot script
+# Executed by pd_init at boot time.
+#
+
+echo "PureDarwin booting..."
+
+# Set hostname
+hostname PureDarwin
+
+# Mount root read-write (if booted read-only)
+mount -uw /
+
+# Create runtime directories
+mkdir -p /var/run /var/log /var/tmp /tmp
+chmod 1777 /tmp /var/tmp
+
+# Set up /dev/fd, /dev/stdin, /dev/stdout, /dev/stderr symlinks if missing
+if [ ! -e /dev/fd ]; then
+    ln -s /dev/fd /dev/fd 2>/dev/null
+fi
+
+# Seed random number generator
+if [ -f /var/db/entropy ]; then
+    cat /var/db/entropy > /dev/random 2>/dev/null
+fi
+
+# Start syslogd if available
+if [ -x /usr/sbin/syslogd ]; then
+    /usr/sbin/syslogd
+fi
+
+# Network configuration (if network tools are available)
+if [ -x /sbin/ifconfig ]; then
+    # Bring up loopback
+    /sbin/ifconfig lo0 127.0.0.1 netmask 255.0.0.0 up
+fi
+
+# Source local boot script
+if [ -f /etc/rc.local ]; then
+    . /etc/rc.local
+fi
+
+echo "PureDarwin boot complete."

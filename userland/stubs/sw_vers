@@ -1,0 +1,11 @@
+#!/bin/sh
+case "$1" in
+  -productName)    echo "PureDarwin" ;;
+  -productVersion) echo "10.13.6" ;;
+  -buildVersion)   echo "17G14033" ;;
+  *)
+    echo "ProductName:	PureDarwin"
+    echo "ProductVersion:	10.13.6"
+    echo "BuildVersion:	17G14033"
+    ;;
+esac

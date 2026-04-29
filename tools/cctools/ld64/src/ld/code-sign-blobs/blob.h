@@ -120,6 +120,15 @@ protected:
 	static BlobCore *readBlob(int fd, uint32_t magic, size_t minSize, size_t maxSize); // streaming
 	static BlobCore *readBlob(int fd, size_t offset, uint32_t magic, size_t minSize, size_t maxSize); // pread(2)@offset
 	
+	BlobCore *clone() const
+	{
+		size_t len = length();
+		BlobCore *copy = (BlobCore *)malloc(len);
+		if (copy)
+			memcpy(copy, this, len);
+		return copy;
+	}
+
 protected:
 	Endian<uint32_t> mMagic;
 	Endian<uint32_t> mLength;

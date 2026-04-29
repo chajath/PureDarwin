@@ -10,7 +10,7 @@
 #include <IOKit/IOTypes.h>
 
 #define APIODMABit(bit)                  ((uint32_t)(1) << bit)
-#define APIODMABitRange32(start, end)    (~(((uint32_t)(1) << start) - 1) & (((uint32_t)(1) << end) | (((uint32_t)(1) << end) - 1)))
+#define APIODMABitRange32(start, end)    ((uint32_t)((start) >= 32 ? 0xFFFFFFFFU : (~(((uint32_t)(1) << (start)) - 1) & (((uint32_t)(1) << (end)) | (((uint32_t)(1) << (end)) - 1)))))
 #define APIODMABitRange64(start, end)    (~(((uint64_t)(1) << start) - 1) & (((uint64_t)(1) << end) | (((uint64_t)(1) << end) - 1)))
 #define APIODMABitRangePhase(start, end) (start)
 
