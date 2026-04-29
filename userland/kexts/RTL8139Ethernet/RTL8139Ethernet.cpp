@@ -7,7 +7,6 @@
 
 #include "RTL8139Ethernet.h"
 #include <IOKit/IOMemoryDescriptor.h>
-#include <IOKit/IOBufferMemoryDescriptor.h>
 
 #define super IOEthernetController
 OSDefineMetaClassAndStructors(RTL8139Ethernet, IOEthernetController)

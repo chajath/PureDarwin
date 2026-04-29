@@ -14,6 +14,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOFilterInterruptEventSource.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/network/IOEthernetController.h>
 #include <IOKit/network/IOEthernetInterface.h>
@@ -133,22 +134,22 @@ class RTL8139Ethernet : public IOEthernetController {
 
 public:
     /* IOService */
-    virtual bool        init(OSDictionary *properties) override;
-    virtual bool        start(IOService *provider) override;
-    virtual void        stop(IOService *provider) override;
-    virtual void        free() override;
+    virtual bool        init(OSDictionary *properties) APPLE_KEXT_OVERRIDE;
+    virtual bool        start(IOService *provider) APPLE_KEXT_OVERRIDE;
+    virtual void        stop(IOService *provider) APPLE_KEXT_OVERRIDE;
+    virtual void        free() APPLE_KEXT_OVERRIDE;
 
     /* IONetworkController */
-    virtual IOReturn    enable(IONetworkInterface *interface) override;
-    virtual IOReturn    disable(IONetworkInterface *interface) override;
-    virtual IOReturn    getHardwareAddress(IOEthernetAddress *addr) override;
-    virtual IOReturn    setMulticastMode(bool active) override;
-    virtual IOReturn    setPromiscuousMode(bool active) override;
-    virtual IOOutputQueue *createOutputQueue() override;
-    virtual UInt32      outputPacket(mbuf_t m, void *param) override;
-    virtual const OSString *newVendorString() const override;
-    virtual const OSString *newModelString() const override;
-    virtual bool        configureInterface(IONetworkInterface *interface) override;
+    virtual IOReturn    enable(IONetworkInterface *interface) APPLE_KEXT_OVERRIDE;
+    virtual IOReturn    disable(IONetworkInterface *interface) APPLE_KEXT_OVERRIDE;
+    virtual IOReturn    getHardwareAddress(IOEthernetAddress *addr) APPLE_KEXT_OVERRIDE;
+    virtual IOReturn    setMulticastMode(bool active) APPLE_KEXT_OVERRIDE;
+    virtual IOReturn    setPromiscuousMode(bool active) APPLE_KEXT_OVERRIDE;
+    virtual IOOutputQueue *createOutputQueue() APPLE_KEXT_OVERRIDE;
+    virtual UInt32      outputPacket(mbuf_t m, void *param) APPLE_KEXT_OVERRIDE;
+    virtual const OSString *newVendorString() const APPLE_KEXT_OVERRIDE;
+    virtual const OSString *newModelString() const APPLE_KEXT_OVERRIDE;
+    virtual bool        configureInterface(IONetworkInterface *interface) APPLE_KEXT_OVERRIDE;
 
 private:
     /* Hardware operations */
