@@ -23,6 +23,9 @@ OSDefineMetaClassAndStructors(RTL8139Ethernet, IOEthernetController)
 
 #define DLOG(fmt, ...) IOLog("RTL8139: " fmt "\n", ##__VA_ARGS__)
 
+/* 32-bit physical address mask for RTL8139 DMA */
+#define DMA_MASK_32BIT  0x00000000FFFFFFFFULL
+
 // ---------------------------------------------------------------------------
 // IOService overrides
 // ---------------------------------------------------------------------------
@@ -43,10 +46,16 @@ bool RTL8139Ethernet::init(OSDictionary *properties)
     fCurTx = 0;
     fDirtyTx = 0;
     fEnabled = false;
+    fNetStats = NULL;
+    fEthStats = NULL;
+    fRxBufPhys = 0;
+    fRxOffset = 0;
+    fWorkLoop = NULL;
 
     for (int i = 0; i < NUM_TX_DESC; i++) {
         fTxBufDesc[i] = NULL;
         fTxBuf[i] = NULL;
+        fTxBufPhys[i] = 0;
     }
 
     return true;
@@ -54,13 +63,17 @@ bool RTL8139Ethernet::init(OSDictionary *properties)
 
 bool RTL8139Ethernet::start(IOService *provider)
 {
-    if (!super::start(provider))
+    DLOG("start() entry");
+
+    if (!super::start(provider)) {
+        DLOG("super::start failed");
         return false;
+    }
 
     fPCIDevice = OSDynamicCast(IOPCIDevice, provider);
     if (!fPCIDevice) {
         DLOG("Provider is not an IOPCIDevice");
-        return false;
+        goto fail;
     }
 
     fPCIDevice->retain();
@@ -69,19 +82,21 @@ bool RTL8139Ethernet::start(IOService *provider)
     /* Enable PCI bus mastering and memory space */
     fPCIDevice->setBusMasterEnable(true);
     fPCIDevice->setMemoryEnable(true);
+    fPCIDevice->setIOEnable(true);
 
-    /* Map BAR1 (MMIO) — RTL8139 uses BAR0 for I/O and BAR1 for MMIO */
-    fRegMap = fPCIDevice->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress1);
+    /* Map BAR0 (I/O space) — QEMU RTL8139 primarily uses I/O ports */
+    fRegMap = fPCIDevice->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
     if (!fRegMap) {
-        /* Fall back to BAR0 (I/O ports) mapped as memory */
-        fRegMap = fPCIDevice->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
+        /* Try BAR1 (MMIO) */
+        fRegMap = fPCIDevice->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress1);
     }
     if (!fRegMap) {
         DLOG("Failed to map device registers");
         goto fail;
     }
     fRegBase = (volatile UInt8 *)fRegMap->getVirtualAddress();
-    DLOG("Registers mapped at %p, length %llu", fRegBase, fRegMap->getLength());
+    DLOG("Registers mapped at %p, length %llu", fRegBase,
+         (unsigned long long)fRegMap->getLength());
 
     /* Reset the chip */
     resetAdapter();
@@ -90,13 +105,14 @@ bool RTL8139Ethernet::start(IOService *provider)
     for (int i = 0; i < 6; i++)
         fMacAddr.bytes[i] = readReg8(RTL_IDR0 + i);
 
-    DLOG("MAC address: %02x:%02x:%02x:%02x:%02x:%02x",
+    DLOG("MAC: %02x:%02x:%02x:%02x:%02x:%02x",
          fMacAddr.bytes[0], fMacAddr.bytes[1], fMacAddr.bytes[2],
          fMacAddr.bytes[3], fMacAddr.bytes[4], fMacAddr.bytes[5]);
 
-    /* Allocate Rx buffer (32K + 16 + 2K wrap padding) */
-    fRxBufDesc = IOBufferMemoryDescriptor::withCapacity(
-        RX_BUF_TOTAL, kIODirectionInOut, true);
+    /* Allocate Rx buffer with 32-bit physical address constraint */
+    fRxBufDesc = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+        kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous,
+        RX_BUF_TOTAL, DMA_MASK_32BIT);
     if (!fRxBufDesc) {
         DLOG("Failed to allocate Rx buffer");
         goto fail;
@@ -105,11 +121,18 @@ bool RTL8139Ethernet::start(IOService *provider)
     fRxBuf = (UInt8 *)fRxBufDesc->getBytesNoCopy();
     fRxBufPhys = fRxBufDesc->getPhysicalAddress();
     memset(fRxBuf, 0, RX_BUF_TOTAL);
+    DLOG("Rx buf: virt=%p phys=0x%llx", fRxBuf, (unsigned long long)fRxBufPhys);
 
-    /* Allocate Tx buffers (4 x 1536 bytes) */
+    if (fRxBufPhys > DMA_MASK_32BIT) {
+        DLOG("FATAL: Rx buffer above 4GB");
+        goto fail;
+    }
+
+    /* Allocate Tx buffers with 32-bit physical address constraint */
     for (int i = 0; i < NUM_TX_DESC; i++) {
-        fTxBufDesc[i] = IOBufferMemoryDescriptor::withCapacity(
-            TX_BUF_SIZE, kIODirectionOut, true);
+        fTxBufDesc[i] = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+            kernel_task, kIODirectionOut | kIOMemoryPhysicallyContiguous,
+            TX_BUF_SIZE, DMA_MASK_32BIT);
         if (!fTxBufDesc[i]) {
             DLOG("Failed to allocate Tx buffer %d", i);
             goto fail;
@@ -117,7 +140,17 @@ bool RTL8139Ethernet::start(IOService *provider)
         fTxBufDesc[i]->prepare();
         fTxBuf[i] = (UInt8 *)fTxBufDesc[i]->getBytesNoCopy();
         fTxBufPhys[i] = fTxBufDesc[i]->getPhysicalAddress();
+
+        if (fTxBufPhys[i] > DMA_MASK_32BIT) {
+            DLOG("FATAL: Tx buffer %d above 4GB", i);
+            goto fail;
+        }
     }
+
+    /* Make sure interrupts are masked before enabling interrupt source */
+    writeReg16(RTL_IMR, 0);
+    /* Clear any pending interrupts */
+    writeReg16(RTL_ISR, 0xFFFF);
 
     /* Set up interrupt source */
     fWorkLoop = getWorkLoop();
@@ -142,7 +175,7 @@ bool RTL8139Ethernet::start(IOService *provider)
     }
     fInterruptSrc->enable();
 
-    /* Attach and register interface */
+    /* Attach and register interface — do NOT enable hardware yet */
     if (!attachInterface((IONetworkInterface **)&fNetIf)) {
         DLOG("Failed to attach network interface");
         goto fail;
@@ -152,6 +185,7 @@ bool RTL8139Ethernet::start(IOService *provider)
     return true;
 
 fail:
+    DLOG("start() failed, cleaning up");
     stop(provider);
     return false;
 }
@@ -225,9 +259,21 @@ IOReturn RTL8139Ethernet::getHardwareAddress(IOEthernetAddress *addr)
     return kIOReturnSuccess;
 }
 
+IOReturn RTL8139Ethernet::getMaxPacketSize(UInt32 *maxSize) const
+{
+    *maxSize = 1500;
+    return kIOReturnSuccess;
+}
+
+IOReturn RTL8139Ethernet::getMinPacketSize(UInt32 *minSize) const
+{
+    *minSize = 64;
+    return kIOReturnSuccess;
+}
+
 IOReturn RTL8139Ethernet::setMulticastMode(bool active)
 {
-    /* Accept all multicast for simplicity */
+    if (!fRegBase) return kIOReturnNotReady;
     writeReg32(RTL_MAR0, 0xFFFFFFFF);
     writeReg32(RTL_MAR4, 0xFFFFFFFF);
     return kIOReturnSuccess;
@@ -235,6 +281,7 @@ IOReturn RTL8139Ethernet::setMulticastMode(bool active)
 
 IOReturn RTL8139Ethernet::setPromiscuousMode(bool active)
 {
+    if (!fRegBase) return kIOReturnNotReady;
     UInt32 rcr = readReg32(RTL_RCR);
     if (active)
         rcr |= RCR_AAP;
@@ -285,7 +332,6 @@ void RTL8139Ethernet::resetAdapter()
     DLOG("Resetting adapter");
     writeReg8(RTL_CR, CR_RST);
 
-    /* Wait for reset to complete (bit clears) */
     for (int i = 0; i < 1000; i++) {
         if (!(readReg8(RTL_CR) & CR_RST))
             break;
@@ -300,53 +346,45 @@ void RTL8139Ethernet::enableAdapter()
 {
     DLOG("Enabling adapter");
 
-    /* Unlock config registers */
     writeReg8(RTL_9346CR, 0xC0);
 
-    /* Set Rx buffer address */
-    writeReg32(RTL_RBSTART, (UInt32)fRxBufPhys);
+    writeReg32(RTL_RBSTART, (UInt32)(fRxBufPhys & 0xFFFFFFFF));
     fRxOffset = 0;
 
-    /* Set Tx buffer addresses */
     for (int i = 0; i < NUM_TX_DESC; i++)
-        writeReg32(RTL_TSAD0 + i * 4, (UInt32)fTxBufPhys[i]);
+        writeReg32(RTL_TSAD0 + i * 4, (UInt32)(fTxBufPhys[i] & 0xFFFFFFFF));
     fCurTx = 0;
     fDirtyTx = 0;
 
-    /* Enable Rx: accept broadcast + unicast + multicast, 32K buffer, no wrap, max DMA */
     writeReg32(RTL_RCR,
         RCR_AB | RCR_AM | RCR_APM |
-        (RX_BUF_LEN_IDX << 11) |   /* Buffer length */
-        (7 << 13) |                  /* Rx FIFO threshold: no threshold */
-        (6 << 8) |                   /* Max DMA burst: unlimited */
-        RCR_WRAP);                   /* Wrap around */
+        (RX_BUF_LEN_IDX << 11) |
+        (7 << 13) |
+        (6 << 8) |
+        RCR_WRAP);
 
-    /* Tx configuration: max DMA burst, interframe gap */
     writeReg32(RTL_TCR, (6 << 8) | (3 << 24));
 
-    /* Accept all multicast */
     writeReg32(RTL_MAR0, 0xFFFFFFFF);
     writeReg32(RTL_MAR4, 0xFFFFFFFF);
 
-    /* Enable interrupts */
+    writeReg16(RTL_ISR, 0xFFFF);
+
+    writeReg8(RTL_CR, CR_RE | CR_TE);
+
     writeReg16(RTL_IMR, INT_ROK | INT_RER | INT_TOK | INT_TER |
                         INT_RXOVW | INT_FOVW | INT_PUN);
 
-    /* Enable Rx and Tx */
-    writeReg8(RTL_CR, CR_RE | CR_TE);
-
-    /* Lock config registers */
     writeReg8(RTL_9346CR, 0x00);
 
-    DLOG("Adapter enabled, Rx buf at phys 0x%x", (UInt32)fRxBufPhys);
+    DLOG("Adapter enabled, Rx phys=0x%x", (unsigned int)(fRxBufPhys & 0xFFFFFFFF));
 }
 
 void RTL8139Ethernet::disableAdapter()
 {
-    /* Disable interrupts */
+    if (!fRegBase) return;
     writeReg16(RTL_IMR, 0);
-
-    /* Disable Rx and Tx */
+    writeReg16(RTL_ISR, 0xFFFF);
     writeReg8(RTL_CR, 0);
 }
 
@@ -363,16 +401,13 @@ UInt32 RTL8139Ethernet::outputPacket(mbuf_t m, void *param)
 
     UInt32 txIdx = fCurTx % NUM_TX_DESC;
 
-    /* Check if descriptor is available */
     UInt32 status = readReg32(RTL_TSD0 + txIdx * 4);
     if (!(status & (TSD_TOK | TSD_TUN | TSD_OWN))) {
-        /* Descriptor busy — should not happen with queue but be safe */
         freePacket(m);
         if (fNetStats) fNetStats->outputErrors++;
         return kIOReturnOutputStall;
     }
 
-    /* Copy packet data to Tx buffer */
     UInt32 pktLen = mbuf_pkthdr_len(m);
     if (pktLen > TX_BUF_SIZE) {
         freePacket(m);
@@ -380,7 +415,6 @@ UInt32 RTL8139Ethernet::outputPacket(mbuf_t m, void *param)
         return kIOReturnOutputDropped;
     }
 
-    /* Linearize mbuf chain into Tx buffer */
     mbuf_t cur = m;
     UInt32 offset = 0;
     while (cur && offset < TX_BUF_SIZE) {
@@ -391,7 +425,6 @@ UInt32 RTL8139Ethernet::outputPacket(mbuf_t m, void *param)
         cur = mbuf_next(cur);
     }
 
-    /* Pad short frames */
     if (pktLen < 60) {
         memset(fTxBuf[txIdx] + pktLen, 0, 60 - pktLen);
         pktLen = 60;
@@ -399,11 +432,8 @@ UInt32 RTL8139Ethernet::outputPacket(mbuf_t m, void *param)
 
     freePacket(m);
 
-    /* Tell hardware to transmit: write length to TSD, clears OWN bit */
     writeReg32(RTL_TSD0 + txIdx * 4, pktLen & 0x1FFF);
-
     fCurTx++;
-
     if (fNetStats) fNetStats->outputPackets++;
 
     return kIOReturnOutputSuccess;
@@ -415,35 +445,30 @@ UInt32 RTL8139Ethernet::outputPacket(mbuf_t m, void *param)
 
 void RTL8139Ethernet::handleRxInterrupt()
 {
+    if (!fRxBuf || !fNetIf) return;
+
     while (!(readReg8(RTL_CR) & CR_BUFE)) {
         UInt32 offset = fRxOffset % RX_BUF_LEN;
         UInt8 *rxPtr = fRxBuf + offset;
 
-        /* RTL8139 Rx header: 4 bytes (status:16, length:16) */
-        UInt16 rxStatus = *(UInt16 *)(rxPtr);
-        UInt16 rxLen    = *(UInt16 *)(rxPtr + 2);
+        UInt16 rxStatus = *(volatile UInt16 *)(rxPtr);
+        UInt16 rxLen    = *(volatile UInt16 *)(rxPtr + 2);
 
-        /* Sanity check */
         if (rxLen == 0 || rxLen > MAX_ETH_FRAME_SIZE + 4 || !(rxStatus & RX_ROK)) {
             DLOG("Rx error: status=0x%04x len=%u", rxStatus, rxLen);
             if (fNetStats) fNetStats->inputErrors++;
-            /* Reset receiver on error */
             resetAdapter();
             enableAdapter();
             return;
         }
 
-        /* Packet data starts at offset+4, length includes 4-byte CRC */
-        UInt32 pktLen = rxLen - 4;  /* Strip CRC */
+        UInt32 pktLen = rxLen - 4;
 
-        /* Allocate mbuf and copy data */
         mbuf_t pkt = allocatePacket(pktLen);
         if (pkt) {
-            UInt8 *src = rxPtr + 4;  /* Skip Rx header */
+            UInt8 *src = rxPtr + 4;
 
-            /* Handle wrap-around: data might span end of buffer */
             if (offset + 4 + rxLen > RX_BUF_LEN) {
-                /* Wrapped — copy in two parts */
                 UInt32 firstPart = RX_BUF_LEN - offset - 4;
                 if (firstPart > pktLen) firstPart = pktLen;
                 memcpy(mbuf_data(pkt), src, firstPart);
@@ -453,21 +478,17 @@ void RTL8139Ethernet::handleRxInterrupt()
                 memcpy(mbuf_data(pkt), src, pktLen);
             }
 
-            /* Submit to network stack */
-            fNetIf->inputPacket(pkt, pktLen, IONetworkInterface::kInputOptionQueuePacket);
+            fNetIf->inputPacket(pkt, pktLen,
+                IONetworkInterface::kInputOptionQueuePacket);
             if (fNetStats) fNetStats->inputPackets++;
         } else {
             if (fNetStats) fNetStats->inputErrors++;
         }
 
-        /* Advance Rx offset: header(4) + length, aligned to 4 bytes + 4 */
         fRxOffset = (offset + rxLen + 4 + 3) & ~3;
-
-        /* Update CAPR (read pointer) */
-        writeReg16(RTL_CAPR, fRxOffset - 16);
+        writeReg16(RTL_CAPR, (UInt16)(fRxOffset - 16));
     }
 
-    /* Flush queued packets */
     fNetIf->flushInputQueue();
 }
 
@@ -482,7 +503,7 @@ void RTL8139Ethernet::handleTxInterrupt()
         UInt32 status = readReg32(RTL_TSD0 + txIdx * 4);
 
         if (!(status & (TSD_TOK | TSD_TABT | TSD_TUN)))
-            break;  /* Not yet complete */
+            break;
 
         if (status & TSD_TABT) {
             DLOG("Tx abort on descriptor %u", txIdx);
@@ -492,7 +513,6 @@ void RTL8139Ethernet::handleTxInterrupt()
         fDirtyTx++;
     }
 
-    /* Wake queue if space available */
     if (fTxQueue)
         fTxQueue->service();
 }
@@ -501,24 +521,26 @@ void RTL8139Ethernet::handleTxInterrupt()
 // Interrupt handling
 // ---------------------------------------------------------------------------
 
-bool RTL8139Ethernet::interruptFilter(OSObject *owner, IOFilterInterruptEventSource *src)
+bool RTL8139Ethernet::interruptFilter(OSObject *owner,
+    IOFilterInterruptEventSource *src)
 {
     RTL8139Ethernet *me = OSDynamicCast(RTL8139Ethernet, owner);
-    if (!me || !me->fRegBase) return false;
+    if (!me || !me->fRegBase || !me->fEnabled) return false;
 
     UInt16 isr = me->readReg16(RTL_ISR);
     if (isr == 0 || isr == 0xFFFF)
-        return false;  /* Not our interrupt */
+        return false;
 
     return true;
 }
 
 void RTL8139Ethernet::interruptOccurred(IOInterruptEventSource *src, int count)
 {
+    if (!fRegBase || !fEnabled) return;
+
     UInt16 isr;
 
     while ((isr = readReg16(RTL_ISR)) != 0) {
-        /* Acknowledge all interrupts */
         writeReg16(RTL_ISR, isr);
 
         if (isr & (INT_ROK | INT_RER | INT_RXOVW | INT_FOVW))

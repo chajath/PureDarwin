@@ -150,6 +150,8 @@ public:
     virtual const OSString *newVendorString() const APPLE_KEXT_OVERRIDE;
     virtual const OSString *newModelString() const APPLE_KEXT_OVERRIDE;
     virtual bool        configureInterface(IONetworkInterface *interface) APPLE_KEXT_OVERRIDE;
+    virtual IOReturn    getMaxPacketSize(UInt32 *maxSize) const APPLE_KEXT_OVERRIDE;
+    virtual IOReturn    getMinPacketSize(UInt32 *minSize) const APPLE_KEXT_OVERRIDE;
 
 private:
     /* Hardware operations */
