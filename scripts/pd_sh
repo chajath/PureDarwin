@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# pd_sh — interactive shell into the PureDarwin guest via pd_inetd.
+#
+# Uses Python to wire stdin/stdout to a TCP socket on localhost:2323
+# (forwarded into the guest by pd_run.sh's SLIRP hostfwd) with raw
+# tty mode so vi/nano/Ctrl-C/line-editing work.
+#
+# Usage: pd_sh
+#        pd_sh "<cmd to run non-interactively>"
+set -euo pipefail
+
+PORT="${PD_INETD_PORT:-2323}"
+HOST="${PD_INETD_HOST:-127.0.0.1}"
+
+if ! python3 -c "import sys,socket; s=socket.socket(); s.settimeout(2); s.connect(('$HOST',$PORT))" 2>/dev/null; then
+  echo "pd_sh: cannot reach $HOST:$PORT — is the guest running and pd_inetd up?" >&2
+  echo "       try: ~/PureDarwin/scripts/pd_run.sh start" >&2
+  exit 1
+fi
+
+if [ $# -gt 0 ]; then
+  # one-shot: send the command, capture output, exit
+  python3 - "$HOST" "$PORT" "$*" <<'PY'
+import socket, sys, time, select
+host, port, cmd = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+s = socket.socket(); s.connect((host, port))
+s.sendall((cmd + "\nexit\n").encode())
+s.settimeout(15)
+data = b""
+try:
+    while True:
+        chunk = s.recv(4096)
+        if not chunk: break
+        data += chunk
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
+except (socket.timeout, OSError):
+    pass
+PY
+  exit
+fi
+
+# interactive: raw stdin, full duplex
+exec python3 - "$HOST" "$PORT" <<'PY'
+import os, sys, socket, select, termios, tty, signal, struct, fcntl
+host, port = sys.argv[1], int(sys.argv[2])
+
+s = socket.socket(); s.connect((host, port))
+s.setblocking(False)
+
+stdin_fd = sys.stdin.fileno()
+old_tty = None
+if os.isatty(stdin_fd):
+    old_tty = termios.tcgetattr(stdin_fd)
+    tty.setraw(stdin_fd)
+
+def restore(_a=None, _b=None):
+    if old_tty is not None:
+        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_tty)
+    try: s.close()
+    except OSError: pass
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, restore)
+signal.signal(signal.SIGHUP,  restore)
+
+try:
+    while True:
+        r, _, _ = select.select([sys.stdin, s], [], [])
+        if sys.stdin in r:
+            data = os.read(stdin_fd, 4096)
+            if not data: break
+            s.sendall(data)
+        if s in r:
+            try:
+                data = s.recv(4096)
+            except BlockingIOError:
+                continue
+            if not data: break
+            os.write(sys.stdout.fileno(), data)
+finally:
+    restore()
+PY
