@@ -93,6 +93,45 @@ extern "C" {
 /* Private types */
 typedef struct { unsigned long long max_bw; unsigned long long eff_bw; } if_bandwidths_t;
 
+/* From bsd/net/if_media.h (not in kernel SDK) */
+struct ifmediareq {
+    char ifm_name[16];
+    int  ifm_current;
+    int  ifm_mask;
+    int  ifm_status;
+    int  ifm_active;
+    int  ifm_count;
+    int  *ifm_ulist;
+};
+struct ifmediareq64 {
+    char ifm_name[16];
+    int  ifm_current;
+    int  ifm_mask;
+    int  ifm_status;
+    int  ifm_active;
+    int  ifm_count;
+    unsigned long long ifmu_ulist;
+};
+struct ifmediareq32 {
+    char ifm_name[16];
+    int  ifm_current;
+    int  ifm_mask;
+    int  ifm_status;
+    int  ifm_active;
+    int  ifm_count;
+    unsigned int ifmu_ulist;
+};
+#ifndef SIOCGIFMEDIA64
+#define SIOCGIFMEDIA64 _IOWR('i', 56, struct ifmediareq64)
+#endif
+#ifndef SIOCSIFMEDIA
+#define SIOCSIFMEDIA _IOWR('i', 55, struct ifreq)
+#endif
+
+/* From IONetworkController private - methods added in newer versions */
+typedef unsigned int mbuf_svc_class_t;
+typedef unsigned int IOMbufServiceClass;
+
 /* Stub functions for private kernel APIs */
 static inline int ifnet_set_link_quality(void *ifp, int q) { return 0; }
 static inline int ml_thread_policy(void *thread, int group, int flags) { return 0; }
@@ -117,3 +156,16 @@ static inline void ifnet_normalise_unsent_data(void) {}
 #endif
 
 #endif /* _PD_IONF_COMPAT_H_ */
+
+/* More missing definitions */
+#ifndef SIOCGIFMEDIA32
+#define SIOCGIFMEDIA32 _IOWR('i', 56, struct ifmediareq32)
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+static inline unsigned int ifnet_eflags(void *ifp) { return 0; }
+#ifdef __cplusplus
+}
+#endif

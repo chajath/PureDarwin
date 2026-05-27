@@ -38,6 +38,8 @@ bool RTL8139Ethernet::init(OSDictionary *properties)
     fPCIDevice = NULL;
     fRegMap = NULL;
     fRegBase = NULL;
+    fIOBar = 0;
+    fUseIO = false;
     fInterruptSrc = NULL;
     fNetIf = NULL;
     fTxQueue = NULL;
@@ -84,19 +86,48 @@ bool RTL8139Ethernet::start(IOService *provider)
     fPCIDevice->setMemoryEnable(true);
     fPCIDevice->setIOEnable(true);
 
-    /* Map BAR0 (I/O space) — QEMU RTL8139 primarily uses I/O ports */
-    fRegMap = fPCIDevice->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
-    if (!fRegMap) {
-        /* Try BAR1 (MMIO) */
-        fRegMap = fPCIDevice->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress1);
+    /*
+     * RTL8139 register space lives in one of two BARs:
+     *   BAR1 = memory MMIO   (present on -C variants, what QEMU's
+     *                         -device rtl8139 may or may not expose)
+     *   BAR0 = PCI I/O ports (always present)
+     *
+     * mapDeviceMemoryWithRegister on an I/O-space BAR returns a map
+     * with length 0 that page-faults on first access, so for BAR0 we
+     * must use the IOPCIDevice ioRead*/ /*ioWrite* helpers directly.
+     */
+    fRegMap = fPCIDevice->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress1);
+    if (fRegMap && fRegMap->getLength() > 0) {
+        fRegBase = (volatile UInt8 *)fRegMap->getVirtualAddress();
+        fUseIO = false;
+        fIOBar = kIOPCIConfigBaseAddress1;
+        DLOG("Using MMIO via BAR1: virt=%p len=%llu",
+             fRegBase, (unsigned long long)fRegMap->getLength());
+    } else {
+        if (fRegMap) { fRegMap->release(); fRegMap = NULL; }
+        /*
+         * Fall back to PCI I/O ports on BAR0. We still need the
+         * IOMemoryMap so ioRead*/ /*ioWrite* know which port range to
+         * target; on an I/O-space BAR the map has length 0 but it
+         * carries the BAR's port base.
+         */
+        fRegMap = fPCIDevice->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
+        if (!fRegMap) {
+            DLOG("BAR0 map failed; no register access path available");
+            goto fail;
+        }
+        fUseIO = true;
+        fIOBar = kIOPCIConfigBaseAddress0;
+        UInt8 probe = fPCIDevice->ioRead8(0x43, fRegMap);
+        if (probe == 0xFF) {
+            DLOG("PCI I/O port probe at BAR0+0x43 returned 0xFF; abort");
+            goto fail;
+        }
+        DLOG("Using PCI I/O ports via BAR0 (probe=0x%02x, map base=0x%llx len=%llu)",
+             probe,
+             (unsigned long long)fRegMap->getPhysicalAddress(),
+             (unsigned long long)fRegMap->getLength());
     }
-    if (!fRegMap) {
-        DLOG("Failed to map device registers");
-        goto fail;
-    }
-    fRegBase = (volatile UInt8 *)fRegMap->getVirtualAddress();
-    DLOG("Registers mapped at %p, length %llu", fRegBase,
-         (unsigned long long)fRegMap->getLength());
 
     /* Reset the chip */
     resetAdapter();
@@ -185,8 +216,22 @@ bool RTL8139Ethernet::start(IOService *provider)
     return true;
 
 fail:
+    /*
+     * Clean up locally; do NOT call stop() — that's IOKit's job once
+     * start() returns false. Calling our own stop() here followed by
+     * IOKit calling it again leads to double-teardown crashes (and any
+     * super::stop() call when we never finished super::start() is
+     * undefined behaviour).
+     */
     DLOG("start() failed, cleaning up");
-    stop(provider);
+    if (fInterruptSrc) {
+        fInterruptSrc->disable();
+        if (fWorkLoop) fWorkLoop->removeEventSource(fInterruptSrc);
+        fInterruptSrc->release();
+        fInterruptSrc = NULL;
+    }
+    if (fRegMap)    { fRegMap->release();    fRegMap = NULL;    fRegBase = NULL; }
+    if (fPCIDevice) { fPCIDevice->close(this); /* released in free() */ }
     return false;
 }
 

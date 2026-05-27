@@ -168,8 +168,10 @@ private:
 
     /* Members */
     IOPCIDevice                     *fPCIDevice;
-    IOMemoryMap                     *fRegMap;
-    volatile UInt8                  *fRegBase;
+    IOMemoryMap                     *fRegMap;     /* may be NULL when using I/O ports */
+    volatile UInt8                  *fRegBase;    /* may be NULL when using I/O ports */
+    UInt8                            fIOBar;       /* PCI config offset of selected BAR */
+    bool                             fUseIO;       /* true = PCI I/O ports, false = MMIO */
     IOWorkLoop                      *fWorkLoop;
     IOFilterInterruptEventSource    *fInterruptSrc;
     IOEthernetInterface             *fNetIf;
@@ -193,13 +195,35 @@ private:
     IOEthernetAddress               fMacAddr;
     bool                            fEnabled;
 
-    /* Register access helpers */
-    UInt8  readReg8(UInt16 offset)  { return fRegBase[offset]; }
-    UInt16 readReg16(UInt16 offset) { return *(volatile UInt16 *)(fRegBase + offset); }
-    UInt32 readReg32(UInt16 offset) { return *(volatile UInt32 *)(fRegBase + offset); }
-    void writeReg8(UInt16 offset, UInt8 val)   { fRegBase[offset] = val; }
-    void writeReg16(UInt16 offset, UInt16 val) { *(volatile UInt16 *)(fRegBase + offset) = val; }
-    void writeReg32(UInt16 offset, UInt32 val) { *(volatile UInt32 *)(fRegBase + offset) = val; }
+    /*
+     * Register access — chooses between MMIO and PCI I/O ports based on
+     * what we successfully opened in start(). On QEMU's basic -device
+     * rtl8139 BAR0 is I/O space and BAR1 (MMIO) is sometimes absent.
+     */
+    UInt8  readReg8(UInt16 offset) {
+        return fUseIO ? fPCIDevice->ioRead8(offset, fRegMap)
+                      : fRegBase[offset];
+    }
+    UInt16 readReg16(UInt16 offset) {
+        return fUseIO ? fPCIDevice->ioRead16(offset, fRegMap)
+                      : *(volatile UInt16 *)(fRegBase + offset);
+    }
+    UInt32 readReg32(UInt16 offset) {
+        return fUseIO ? fPCIDevice->ioRead32(offset, fRegMap)
+                      : *(volatile UInt32 *)(fRegBase + offset);
+    }
+    void writeReg8(UInt16 offset, UInt8 val) {
+        if (fUseIO) fPCIDevice->ioWrite8(offset, val, fRegMap);
+        else        fRegBase[offset] = val;
+    }
+    void writeReg16(UInt16 offset, UInt16 val) {
+        if (fUseIO) fPCIDevice->ioWrite16(offset, val, fRegMap);
+        else        *(volatile UInt16 *)(fRegBase + offset) = val;
+    }
+    void writeReg32(UInt16 offset, UInt32 val) {
+        if (fUseIO) fPCIDevice->ioWrite32(offset, val, fRegMap);
+        else        *(volatile UInt32 *)(fRegBase + offset) = val;
+    }
 };
 
 #endif /* _RTL8139ETHERNET_H_ */
