@@ -7,13 +7,19 @@
 #   wait [pattern] [t]           wait until serial matches; default = launchd-up
 #   shot [path]                  screendump current QEMU display to PNG
 #   sendkey <keys...>            forward sendkey commands to QEMU monitor
+#   send <text>                  type <text>+Enter into the guest console
+#   sendraw <text>               write <text> to guest console without Enter
+#   interact                     attach stdin/stdout to guest console (Ctrl-]Q to quit)
 #   kill                         stop any running QEMU and clean up
 #
 # Globals exposed:
-#   /tmp/pd_serial.log   live serial console capture
-#   /tmp/pd_qemu.pid     QEMU pid file
-#   /tmp/pd_mon.sock     QEMU monitor socket (text protocol)
-#   /tmp/pd_screen.png   most recent screendump
+#   /tmp/pd_serial.log     live serial console capture (append-only)
+#   /tmp/pd_qemu.pid       QEMU pid file
+#   /tmp/pd_mon.sock       QEMU monitor socket (text protocol)
+#   /tmp/pd_console.sock   QEMU serial chardev (bidirectional)
+#   /tmp/pd_console_in     FIFO; bytes written here go into guest stdin
+#   /tmp/pd_relay.pid      pd_console_relay.py pid file
+#   /tmp/pd_screen.png     most recent screendump
 #
 # Exit codes from probe:
 #   0  pattern matched
@@ -21,14 +27,19 @@
 #   2  panic detected
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJ_DIR="$HOME/PureDarwin/userland/boot"
 RAW="$PROJ_DIR/pd_17_4_modded.raw"
 VMDK="$PROJ_DIR/pd_17_4_modded.vmdk"
 SERIAL_LOG="/tmp/pd_serial.log"
 MONITOR_SOCK="/tmp/pd_mon.sock"
+CONSOLE_SOCK="/tmp/pd_console.sock"
+CONSOLE_IN="/tmp/pd_console_in"
+RELAY_PID_FILE="/tmp/pd_relay.pid"
 SCREENSHOT_PPM="/tmp/pd_screen.ppm"
 SCREENSHOT_PNG="/tmp/pd_screen.png"
 PID_FILE="/tmp/pd_qemu.pid"
+RELAY_PY="$SCRIPT_DIR/pd_console_relay.py"
 
 QEMU=qemu-system-x86_64
 QEMU_ARGS=(
@@ -38,7 +49,7 @@ QEMU_ARGS=(
   -netdev user,id=net0,hostfwd=tcp::2222-:22
   -device rtl8139,netdev=net0
   -display none
-  -chardev "file,path=$SERIAL_LOG,id=s0"
+  -chardev "socket,id=s0,path=$CONSOLE_SOCK,server=on,wait=off"
   -serial chardev:s0
   -monitor "unix:$MONITOR_SOCK,server,nowait"
   -no-reboot
@@ -64,6 +75,11 @@ shot() {
 }
 
 kill_qemu() {
+  if [ -f "$RELAY_PID_FILE" ]; then
+    local rpid; rpid=$(cat "$RELAY_PID_FILE" 2>/dev/null || true)
+    [ -n "$rpid" ] && kill "$rpid" 2>/dev/null || true
+    rm -f "$RELAY_PID_FILE"
+  fi
   if [ -f "$PID_FILE" ]; then
     local pid; pid=$(cat "$PID_FILE")
     if kill -0 "$pid" 2>/dev/null; then
@@ -74,7 +90,8 @@ kill_qemu() {
     rm -f "$PID_FILE"
   fi
   pkill -9 -f "$QEMU.*pd_17_4_modded" 2>/dev/null || true
-  rm -f "$MONITOR_SOCK"
+  pkill -9 -f "pd_console_relay.py" 2>/dev/null || true
+  rm -f "$MONITOR_SOCK" "$CONSOLE_SOCK" "$CONSOLE_IN"
 }
 
 ensure_vmdk() {
@@ -88,7 +105,7 @@ ensure_vmdk() {
 boot_async() {
   ensure_vmdk
   : > "$SERIAL_LOG"
-  rm -f "$MONITOR_SOCK" "$PID_FILE"
+  rm -f "$MONITOR_SOCK" "$CONSOLE_SOCK" "$CONSOLE_IN" "$PID_FILE" "$RELAY_PID_FILE"
   "$QEMU" "${QEMU_ARGS[@]}" >/dev/null 2>&1 &
   local pid=$!
   echo "$pid" > "$PID_FILE"
@@ -98,11 +115,24 @@ boot_async() {
     sleep 0.1
   done
 
+  # Start console relay (socket <-> serial.log + FIFO).
+  PD_CONSOLE_SOCK="$CONSOLE_SOCK" PD_SERIAL_LOG="$SERIAL_LOG" \
+  PD_CONSOLE_IN="$CONSOLE_IN" PD_RELAY_PID="$RELAY_PID_FILE" \
+    python3 "$RELAY_PY" >/dev/null 2>&1 &
+
   # Chameleon shows a "boot:" prompt and waits forever w/o a Timeout key.
   # Send Enter twice (a few seconds apart) to start the default boot.
   ( sleep 4; mon "sendkey ret" >/dev/null;
     sleep 4; mon "sendkey ret" >/dev/null ) &
   echo "$pid"
+}
+
+# Ensure FIFO exists for `send` even when no QEMU is running.
+ensure_fifo() {
+  if [ ! -p "$CONSOLE_IN" ]; then
+    echo "console FIFO $CONSOLE_IN not present (is QEMU running?)" >&2
+    return 1
+  fi
 }
 
 wait_for() {
@@ -134,6 +164,28 @@ case "${1:-probe}" in
     shift
     mon "sendkey $*"
     ;;
+  send)
+    shift
+    ensure_fifo
+    # Append CR (Enter) so the guest shell sees a complete line.
+    printf '%s\r' "$*" > "$CONSOLE_IN"
+    ;;
+  sendraw)
+    shift
+    ensure_fifo
+    printf '%s' "$*" > "$CONSOLE_IN"
+    ;;
+  interact)
+    ensure_fifo
+    echo "--- pd_run interact: type to send. Ctrl-D to detach. ---" >&2
+    # tail -F runs forever; stdin lines go to the FIFO.
+    ( tail -n 50 -F "$SERIAL_LOG" & echo $! > /tmp/pd_tail.pid; wait ) &
+    tail_pid=$!
+    trap '[ -f /tmp/pd_tail.pid ] && kill -9 $(cat /tmp/pd_tail.pid) 2>/dev/null; rm -f /tmp/pd_tail.pid; kill $tail_pid 2>/dev/null' EXIT INT TERM
+    while IFS= read -r line; do
+      printf '%s\r' "$line" > "$CONSOLE_IN"
+    done
+    ;;
   wait)
     wait_for "${2:-com.apple.launchd}" "${3:-300}"
     ;;
@@ -163,7 +215,7 @@ case "${1:-probe}" in
     exit $rc
     ;;
   *)
-    echo "usage: $0 {probe [dur] [pattern]|boot|wait [pat] [t]|kill|shot [path]|sendkey <keys>}" >&2
+    echo "usage: $0 {probe [dur] [pattern]|boot|wait [pat] [t]|kill|shot [path]|sendkey <keys>|send <text>|sendraw <text>|interact}" >&2
     exit 2
     ;;
 esac
