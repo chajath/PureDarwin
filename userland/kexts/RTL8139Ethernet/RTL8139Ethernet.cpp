@@ -318,7 +318,7 @@ IOReturn RTL8139Ethernet::getMinPacketSize(UInt32 *minSize) const
 
 IOReturn RTL8139Ethernet::setMulticastMode(bool active)
 {
-    if (!fRegBase) return kIOReturnNotReady;
+    if (!fPCIDevice) return kIOReturnNotReady;
     writeReg32(RTL_MAR0, 0xFFFFFFFF);
     writeReg32(RTL_MAR4, 0xFFFFFFFF);
     return kIOReturnSuccess;
@@ -326,7 +326,7 @@ IOReturn RTL8139Ethernet::setMulticastMode(bool active)
 
 IOReturn RTL8139Ethernet::setPromiscuousMode(bool active)
 {
-    if (!fRegBase) return kIOReturnNotReady;
+    if (!fPCIDevice) return kIOReturnNotReady;
     UInt32 rcr = readReg32(RTL_RCR);
     if (active)
         rcr |= RCR_AAP;
@@ -427,7 +427,7 @@ void RTL8139Ethernet::enableAdapter()
 
 void RTL8139Ethernet::disableAdapter()
 {
-    if (!fRegBase) return;
+    if (!fPCIDevice) return;
     writeReg16(RTL_IMR, 0);
     writeReg16(RTL_ISR, 0xFFFF);
     writeReg8(RTL_CR, 0);
@@ -570,7 +570,14 @@ bool RTL8139Ethernet::interruptFilter(OSObject *owner,
     IOFilterInterruptEventSource *src)
 {
     RTL8139Ethernet *me = OSDynamicCast(RTL8139Ethernet, owner);
-    if (!me || !me->fRegBase || !me->fEnabled) return false;
+    /*
+     * Do NOT gate on fRegBase here: in PCI-I/O-port (fUseIO) mode
+     * fRegBase is intentionally NULL and register access goes through
+     * fPCIDevice->ioRead*().  Gating on fRegBase would make the filter
+     * always return false, the ISR would never be cleared, the IRQ
+     * line would stay asserted, and the CPU would livelock.
+     */
+    if (!me || !me->fPCIDevice || !me->fEnabled) return false;
 
     UInt16 isr = me->readReg16(RTL_ISR);
     if (isr == 0 || isr == 0xFFFF)
@@ -581,7 +588,7 @@ bool RTL8139Ethernet::interruptFilter(OSObject *owner,
 
 void RTL8139Ethernet::interruptOccurred(IOInterruptEventSource *src, int count)
 {
-    if (!fRegBase || !fEnabled) return;
+    if (!fPCIDevice || !fEnabled) return;
 
     UInt16 isr;
 

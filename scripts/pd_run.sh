@@ -47,7 +47,7 @@ QEMU_ARGS=(
   -m 2G
   -cpu Penryn
   -drive "file=$VMDK,format=vmdk,if=ide"
-  -netdev user,id=net0,hostfwd=tcp::2222-:22
+  -netdev user,id=net0,hostfwd=tcp::2221-:21,hostfwd=tcp::2222-:22,hostfwd=tcp::2323-:2323
   -device rtl8139,netdev=net0
   -display none
   -chardev "socket,id=s0,path=$CONSOLE_SOCK,server=on,wait=off"
