@@ -32,6 +32,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJ_DIR="$HOME/PureDarwin/userland/boot"
 RAW="$PROJ_DIR/pd_17_4_modded.raw"
 VMDK="$PROJ_DIR/pd_17_4_modded.vmdk"
+DATA_RAW="$PROJ_DIR/pd_data.raw"
+DATA_VMDK="$PROJ_DIR/pd_data.vmdk"
 SERIAL_LOG="/tmp/pd_serial.log"
 MONITOR_SOCK="/tmp/pd_mon.sock"
 CONSOLE_SOCK="/tmp/pd_console.sock"
@@ -46,13 +48,15 @@ QEMU=qemu-system-x86_64
 QEMU_ARGS=(
   -m 2G
   -cpu Penryn
-  -drive "file=$VMDK,format=vmdk,if=ide"
+  -drive "file=$VMDK,format=vmdk,if=ide,bus=0,unit=0"
+  -drive "file=$DATA_VMDK,format=vmdk,if=ide,bus=0,unit=1"
   -netdev user,id=net0,hostfwd=tcp::2221-:21,hostfwd=tcp::2222-:22,hostfwd=tcp::2323-:2323
   -device rtl8139,netdev=net0
   -display none
   -chardev "socket,id=s0,path=$CONSOLE_SOCK,server=on,wait=off"
   -serial chardev:s0
   -monitor "unix:$MONITOR_SOCK,server,nowait"
+  -boot order=c
   -no-reboot
 )
 
@@ -97,9 +101,14 @@ kill_qemu() {
 
 ensure_vmdk() {
   if [ ! -f "$VMDK" ] || [ "$RAW" -nt "$VMDK" ]; then
-    echo "Rebuilding VMDK from raw..."
+    echo "Rebuilding root VMDK from raw..."
     rm -f "$VMDK"
     qemu-img convert -f raw "$RAW" -O vmdk "$VMDK"
+  fi
+  if [ -f "$DATA_RAW" ] && { [ ! -f "$DATA_VMDK" ] || [ "$DATA_RAW" -nt "$DATA_VMDK" ]; }; then
+    echo "Rebuilding data VMDK from raw..."
+    rm -f "$DATA_VMDK"
+    qemu-img convert -f raw "$DATA_RAW" -O vmdk "$DATA_VMDK"
   fi
 }
 
