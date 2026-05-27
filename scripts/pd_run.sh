@@ -3,6 +3,7 @@
 #
 # Subcommands:
 #   probe [duration] [pattern]   boot, wait until match/panic/timeout, exit
+#   start                        boot async; return when QEMU + relay are up
 #   boot                         boot and stream serial to stdout
 #   wait [pattern] [t]           wait until serial matches; default = launchd-up
 #   shot [path]                  screendump current QEMU display to PNG
@@ -189,6 +190,12 @@ case "${1:-probe}" in
   wait)
     wait_for "${2:-com.apple.launchd}" "${3:-300}"
     ;;
+  start)
+    # Start QEMU + relay and return immediately (no auto-kill).
+    kill_qemu
+    boot_async >/dev/null
+    echo "QEMU pid $(cat $PID_FILE) started; use 'pd_run.sh send <cmd>', 'pd_run.sh kill' to stop"
+    ;;
   boot)
     kill_qemu
     boot_async >/dev/null
@@ -215,7 +222,7 @@ case "${1:-probe}" in
     exit $rc
     ;;
   *)
-    echo "usage: $0 {probe [dur] [pattern]|boot|wait [pat] [t]|kill|shot [path]|sendkey <keys>|send <text>|sendraw <text>|interact}" >&2
+    echo "usage: $0 {probe [dur] [pattern]|start|boot|wait [pat] [t]|kill|shot [path]|sendkey <keys>|send <text>|sendraw <text>|interact}" >&2
     exit 2
     ;;
 esac
