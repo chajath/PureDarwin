@@ -88,8 +88,15 @@ kill_qemu() {
   if [ -f "$PID_FILE" ]; then
     local pid; pid=$(cat "$PID_FILE")
     if kill -0 "$pid" 2>/dev/null; then
+      # Try to flush guest writes before yanking the VM.
+      if [ -p "$CONSOLE_IN" ]; then
+        printf 'sync\r' > "$CONSOLE_IN" 2>/dev/null || true
+        sleep 1
+        printf 'sync\r' > "$CONSOLE_IN" 2>/dev/null || true
+        sleep 1
+      fi
       mon "quit" >/dev/null 2>&1 || true
-      sleep 0.3
+      sleep 1
       kill -9 "$pid" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"

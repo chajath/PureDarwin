@@ -116,3 +116,13 @@ fastlane/test_output
 iOSInjectionProject/
 
 # End of https://www.gitignore.io/api/macos,swift
+
+# PureDarwin iteration harness — runtime artifacts
+userland/boot/
+userland/.download/
+userland/rootfs/
+userland/pkgsrc-cross/
+userland/kexts/*.kext/
+userland/network/pd_inetd
+userland/network/pd_net_attach
+scripts/__pycache__/

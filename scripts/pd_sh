@@ -19,23 +19,32 @@ if ! python3 -c "import sys,socket; s=socket.socket(); s.settimeout(2); s.connec
 fi
 
 if [ $# -gt 0 ]; then
-  # one-shot: send the command, capture output, exit
+  # one-shot: send the command, capture output, exit when shell prompt returns
   python3 - "$HOST" "$PORT" "$*" <<'PY'
-import socket, sys, time, select
+import socket, sys, time
 host, port, cmd = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+TIMEOUT = float(__import__("os").environ.get("PD_SH_TIMEOUT", "60"))
+
 s = socket.socket(); s.connect((host, port))
-s.sendall((cmd + "\nexit\n").encode())
-s.settimeout(15)
+# Use a unique marker so we know the command completed.
+marker = "__PDSH_DONE_%d__" % int(time.time())
+s.sendall(("{ %s; }; echo %s\nexit\n" % (cmd, marker)).encode())
+s.settimeout(TIMEOUT)
 data = b""
+saw_marker = False
 try:
     while True:
         chunk = s.recv(4096)
-        if not chunk: break
+        if not chunk:
+            break
         data += chunk
         sys.stdout.buffer.write(chunk)
         sys.stdout.buffer.flush()
+        if marker.encode() in data and b"logout" in data:
+            break
 except (socket.timeout, OSError):
     pass
+s.close()
 PY
   exit
 fi
